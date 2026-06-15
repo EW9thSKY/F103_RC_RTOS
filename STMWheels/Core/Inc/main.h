@@ -91,8 +91,8 @@ void Error_Handler(void);
 #define MCU_TX_GPIO_Port GPIOA
 #define MCU_RX_Pin GPIO_PIN_10
 #define MCU_RX_GPIO_Port GPIOA
-#define LH_B_Pin GPIO_PIN_11
-#define LH_B_GPIO_Port GPIOA
+#define LH_B_GPIO_Pin GPIO_PIN_11
+#define LH_B_GPIO_GPIO_Port GPIOA
 #define LED_HL_Pin GPIO_PIN_12
 #define LED_HL_GPIO_Port GPIOA
 #define LED_HR_Pin GPIO_PIN_15
@@ -101,8 +101,8 @@ void Error_Handler(void);
 #define RQ_F_GPIO_Port GPIOB
 #define RQ_B_Pin GPIO_PIN_5
 #define RQ_B_GPIO_Port GPIOB
-#define RH_B_Pin GPIO_PIN_6
-#define RH_B_GPIO_Port GPIOB
+#define RH_B_GPIO_Pin GPIO_PIN_6
+#define RH_B_GPIO_GPIO_Port GPIOB
 #define RH_F_Pin GPIO_PIN_7
 #define RH_F_GPIO_Port GPIOB
 #define IR_PWM_Pin GPIO_PIN_8
