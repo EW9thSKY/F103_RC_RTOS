@@ -27,7 +27,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "RZ7899.h"
+#include "CarConfig.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,7 +49,10 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+RZ7899_Handle hMotorLF;
+RZ7899_Handle hMotorRF;
+RZ7899_Handle hMotorLR;
+RZ7899_Handle hMotorRR;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -99,7 +103,47 @@ int main(void)
   MX_TIM4_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  hMotorLF.Config.IN1_Port = LQ_F_GPIO_Port;
+  hMotorLF.Config.IN1_Pin = LQ_F_Pin;
+  hMotorLF.Config.IN2_Port = LQ_B_GPIO_Port;
+  hMotorLF.Config.IN2_Pin = LQ_B_Pin;
+  hMotorLF.Config.PwmPin = RZ7899_PWM_BOTH;
+  hMotorLF.Config.htim = &htim3;
+  hMotorLF.Config.PwmChannel = TIM_CHANNEL_4;
+  hMotorLF.Config.PwmChannel2 = TIM_CHANNEL_3;
 
+  hMotorRF.Config.IN1_Port = RQ_F_GPIO_Port;
+  hMotorRF.Config.IN1_Pin = RQ_F_Pin;
+  hMotorRF.Config.IN2_Port = RQ_B_GPIO_Port;
+  hMotorRF.Config.IN2_Pin = RQ_B_Pin;
+  hMotorRF.Config.PwmPin = RZ7899_PWM_BOTH;
+  hMotorRF.Config.htim = &htim3;
+  hMotorRF.Config.PwmChannel = TIM_CHANNEL_1;
+  hMotorRF.Config.PwmChannel2 = TIM_CHANNEL_2;
+
+  hMotorLR.Config.IN1_Port = LH_F_GPIO_Port;
+  hMotorLR.Config.IN1_Pin = LH_F_Pin;
+  hMotorLR.Config.IN2_Port = RH_B_GPIO_GPIO_Port;
+  hMotorLR.Config.IN2_Pin = RH_B_GPIO_Pin;
+  hMotorLR.Config.PwmPin = RZ7899_PWM_IN1;
+  hMotorLR.Config.htim = &htim2;
+  hMotorLR.Config.PwmChannel = TIM_CHANNEL_2;
+
+  hMotorRR.Config.IN1_Port = RH_F_GPIO_Port;
+  hMotorRR.Config.IN1_Pin = RH_F_Pin;
+  hMotorRR.Config.IN2_Port = LH_B_GPIO_GPIO_Port;
+  hMotorRR.Config.IN2_Pin = LH_B_GPIO_Pin;
+  hMotorRR.Config.PwmPin = RZ7899_PWM_IN1;
+  hMotorRR.Config.htim = &htim4;
+  hMotorRR.Config.PwmChannel = TIM_CHANNEL_2;
+
+  RZ7899_Init(&hMotorLF);
+  RZ7899_Init(&hMotorRF);
+  RZ7899_Init(&hMotorLR);
+  RZ7899_Init(&hMotorRR);
+
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, IR_PWM_PULSE);
   /* USER CODE END 2 */
 
   /* Call init function for freertos objects (in cmsis_os2.c) */

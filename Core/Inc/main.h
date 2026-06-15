@@ -97,6 +97,8 @@ void Error_Handler(void);
 #define LED_HL_GPIO_Port GPIOA
 #define LED_HR_Pin GPIO_PIN_15
 #define LED_HR_GPIO_Port GPIOA
+#define LH_F_Pin GPIO_PIN_3
+#define LH_F_GPIO_Port GPIOB
 #define RQ_F_Pin GPIO_PIN_4
 #define RQ_F_GPIO_Port GPIOB
 #define RQ_B_Pin GPIO_PIN_5
@@ -111,7 +113,8 @@ void Error_Handler(void);
 #define ECHO_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-
+#define LH_F_Pin GPIO_PIN_3
+#define LH_F_GPIO_Port GPIOB
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
