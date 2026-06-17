@@ -144,6 +144,28 @@ int main(void)
 
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, IR_PWM_PULSE);
+
+  /*
+   * PA2 (BUZZER) 在 MX_TIM2_Init 中被配置为 AF_PP (TIM2_CH3)。
+   * 此处重配为 GPIO 输出，HIGH 速度确保 SS8050 开关边沿陡峭 →
+   * 减少线性区时间 → 更大音量 + 更清晰音色。
+   */
+  {
+    GPIO_InitTypeDef GPIO_Init = {0};
+    GPIO_Init.Mode  = GPIO_MODE_OUTPUT_PP;
+    GPIO_Init.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_Init.Pin   = BUZZER_Pin;
+    HAL_GPIO_Init(BUZZER_GPIO_Port, &GPIO_Init);
+    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+  }
+
+  /* DWT 周期计数器使能 (微秒级定时, 供 SR04 / 蜂鸣器使用) */
+  if (!(CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk))
+  {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL   |= DWT_CTRL_CYCCNTENA_Msk;
+  }
   /* USER CODE END 2 */
 
   /* Call init function for freertos objects (in cmsis_os2.c) */
