@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "RZ7899.h"
 #include "CarConfig.h"
+#include "oled_ssd1306.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,9 +54,13 @@ extern RZ7899_Handle hMotorLF;
 extern RZ7899_Handle hMotorRF;
 extern RZ7899_Handle hMotorLR;
 extern RZ7899_Handle hMotorRR;
+extern TIM_HandleTypeDef htim4;   /* 供 Calib_SetPWM 使用 */
+extern I2C_HandleTypeDef hi2c2;   /* 供 OLED 使用            */
 
 typedef enum {
     STATE_DISABLED = 0,
+    STATE_CALIBRATING,    /* 上电自校准                        */
+    STATE_CAL_FAILED,     /* 校准失败 → LED 频闪               */
     STATE_ENABLED
 } SystemState;
 
@@ -75,6 +80,12 @@ typedef struct {
 volatile SystemState  g_SystemEnabled   = STATE_DISABLED;
 volatile DriveCommand g_DriveCmd        = {DRIVE_STOP, 0, 0, 0, 0};
 volatile uint16_t     g_BarrierDistance = 0;
+volatile uint16_t     g_TrackSensors    = 0;  /* 最新循迹位图 (供 OLED) */
+volatile uint32_t     g_RunTimeSec      = 0;  /* 运行秒数 (供 OLED 看门狗) */
+
+/* IR 循迹自校准运行时变量 (仅 CommandTask 访问) */
+volatile uint16_t     g_CalibPulse;       /* 当前校准 PWM           */
+volatile uint8_t      g_CalibFailed;      /* 校准失败标志 (1=失败)   */
 
 /* 兰花草乐谱 (定义见 Application 区) */
 extern const MelodyNote MELODY_LANHUACAO[MELODY_NOTE_COUNT];
@@ -90,10 +101,13 @@ osMessageQId TrackingStatusHandle;
 static void TrackStop(void);
 static void TrackDrive(uint8_t lfSpeed, uint8_t lrSpeed,
                         uint8_t rfSpeed, uint8_t rrSpeed);
-static uint8_t ButtonPressed(void);
+static uint8_t  ButtonPressed(void);
 static uint16_t SR04_Measure(void);
-static void DWT_DelayUs(uint32_t us);
+static void     DWT_DelayUs(uint32_t us);
 static uint32_t DWT_GetUs(void);
+static void     Calib_SetPWM(uint16_t pulse);
+static uint8_t  Calib_ReadMidSensors(void);
+static uint8_t  Calib_ReadAllSensors(void);
 /* USER CODE END FunctionPrototypes */
 
 void StartCommandTask(void const * argument);
@@ -185,8 +199,7 @@ void StartCommandTask(void const * argument)
 
   /*
    * CommandTask — 全局状态机 (唯一决策者)
-   *   输入: TrackingStatusHandle, BarrierdistanceHandle 队列
-   *   输出: g_DriveCmd (驱动指令), g_SystemEnabled, g_BarrierDistance
+   *   状态: DISABLED → CALIBRATING → (CAL_FAILED) → ENABLED
    *   严禁直接操作硬件 (电机 / LED / 蜂鸣器)
    */
   uint16_t sensor;
@@ -197,74 +210,224 @@ void StartCommandTask(void const * argument)
   {
     switch (g_SystemEnabled)
     {
-    /* ---- 系统关闭: 等待按键启动 ---- */
+    /* =========================================================== */
+    /*  系统关闭: 等待按键                                          */
+    /* =========================================================== */
     case STATE_DISABLED:
       g_DriveCmd.dir = DRIVE_STOP;
-      g_BarrierDistance = 0;  /* 清除旧障碍数据 */
+      g_BarrierDistance = 0;
+      g_CalibFailed = 0;
       if (ButtonPressed())
-        g_SystemEnabled = STATE_ENABLED;
+        g_SystemEnabled = STATE_CALIBRATING;
       osDelay(20);
       break;
 
-    /* ---- 系统运行: 非阻塞事件驱动 ---- */
+    /* =========================================================== */
+    /*  上电自校准: IR 阈值搜索 (上限 → 下限 → 均值)               */
+    /* =========================================================== */
+    case STATE_CALIBRATING:
+      {
+        uint32_t upCoarse, upFine;     /* 上限: ≥1 中间 HIGH    */
+        uint32_t loCoarse, loFine;     /* 下限: 全部 5 路 HIGH    */
+        uint32_t scanHi, scanLo;
+
+        g_CalibPulse = 65535;
+        Calib_SetPWM(g_CalibPulse);
+        g_DriveCmd.dir = DRIVE_STOP;
+
+        /* ===================================================== */
+        /*  Phase 1: 找上限 (≥1 中间传感器稳定 HIGH)             */
+        /* ===================================================== */
+        upCoarse = 0;
+        while (g_CalibPulse >= CALIB_MIN_PULSE)
+        {
+          osDelay(CALIB_COARSE_MS);
+          if (Calib_ReadMidSensors())
+          {
+            upCoarse = g_CalibPulse;
+            break;
+          }
+          if (g_CalibPulse < CALIB_COARSE_STEP + CALIB_MIN_PULSE) break;
+          g_CalibPulse -= CALIB_COARSE_STEP;
+          Calib_SetPWM(g_CalibPulse);
+        }
+        if (upCoarse == 0) goto calib_fail;  /* 全程无信号 */
+
+        /* 上限精扫: 在 [upCoarse+5%, upCoarse-5%] 间以 1% 步长 */
+        scanHi = (upCoarse + CALIB_COARSE_STEP <= 65535)
+                  ? upCoarse + CALIB_COARSE_STEP : 65535;
+        scanLo = (upCoarse >= CALIB_COARSE_STEP + CALIB_MIN_PULSE)
+                  ? upCoarse - CALIB_COARSE_STEP : CALIB_MIN_PULSE;
+        upFine = upCoarse;  /* fallback */
+        g_CalibPulse = (uint16_t)scanHi;
+        while (g_CalibPulse >= scanLo)
+        {
+          Calib_SetPWM(g_CalibPulse);
+          osDelay(CALIB_FINE_MS);
+          if (Calib_ReadMidSensors())
+          {
+            upFine = g_CalibPulse;
+            break;
+          }
+          if (g_CalibPulse < CALIB_FINE_STEP) break;
+          g_CalibPulse -= CALIB_FINE_STEP;
+        }
+
+        /* ===================================================== */
+        /*  Phase 2: 找下限 (全部 5 路传感器稳定 HIGH)             */
+        /*  从上限值继续向下扫描                                   */
+        /* ===================================================== */
+        loCoarse = 0;
+        g_CalibPulse = (uint16_t)(upFine > CALIB_COARSE_STEP
+                                   ? upFine - CALIB_COARSE_STEP
+                                   : CALIB_MIN_PULSE);
+        while (g_CalibPulse >= CALIB_MIN_PULSE)
+        {
+          Calib_SetPWM(g_CalibPulse);
+          osDelay(CALIB_COARSE_MS);
+          if (Calib_ReadAllSensors())
+          {
+            loCoarse = g_CalibPulse;
+            break;
+          }
+          if (g_CalibPulse < CALIB_COARSE_STEP + CALIB_MIN_PULSE) break;
+          g_CalibPulse -= CALIB_COARSE_STEP;
+        }
+
+        if (loCoarse > 0)
+        {
+          /* 下限精扫 */
+          scanHi = (loCoarse + CALIB_COARSE_STEP <= 65535)
+                    ? loCoarse + CALIB_COARSE_STEP : 65535;
+          scanLo = (loCoarse >= CALIB_COARSE_STEP + CALIB_MIN_PULSE)
+                    ? loCoarse - CALIB_COARSE_STEP : CALIB_MIN_PULSE;
+          loFine = loCoarse;
+          g_CalibPulse = (uint16_t)scanHi;
+          while (g_CalibPulse >= scanLo)
+          {
+            Calib_SetPWM(g_CalibPulse);
+            osDelay(CALIB_FINE_MS);
+            if (Calib_ReadAllSensors())
+            {
+              loFine = g_CalibPulse;
+              break;
+            }
+            if (g_CalibPulse < CALIB_FINE_STEP) break;
+            g_CalibPulse -= CALIB_FINE_STEP;
+          }
+        }
+        else
+        {
+          /* 下限未命中: 用最低值作为下限 */
+          loFine = CALIB_MIN_PULSE;
+        }
+
+        /* ===================================================== */
+        /*  Phase 3: 取均值作为最终阈值                           */
+        /* ===================================================== */
+        {
+          uint32_t avg = (upFine + loFine) / 2;
+          g_CalibPulse = (uint16_t)avg;
+          Calib_SetPWM(g_CalibPulse);
+        }
+        g_SystemEnabled = STATE_ENABLED;
+        break;
+
+calib_fail:
+        g_CalibFailed = 1;
+        g_SystemEnabled = STATE_CAL_FAILED;
+        break;
+      }
+
+    /* =========================================================== */
+    /*  校准失败: LED 1Hz 频闪 (执行在 ChassisTask)                  */
+    /* =========================================================== */
+    case STATE_CAL_FAILED:
+      g_DriveCmd.dir = DRIVE_STOP;
+      if (ButtonPressed())
+      {
+        g_CalibFailed = 0;
+        g_SystemEnabled = STATE_CALIBRATING;  /* 重新校准 */
+      }
+      osDelay(20);
+      break;
+
+    /* =========================================================== */
+    /*  系统运行: 循迹 + 避障                                       */
+    /* =========================================================== */
     case STATE_ENABLED:
       {
-        /*
-         * 双队列均非阻塞读取:
-         * - 有新数据 → 立即更新 g_DriveCmd / g_BarrierDistance
-         * - 无新数据 → 保持上一轮指令, 状态机不卡顿
-         * 避障判断在循迹之后运行, 可覆盖为停车 (最高优先级)
-         */
         osEvent evt;
 
-        /* ① 非阻塞消费超声波数据 → 更新 g_BarrierDistance */
+        /* ① 非阻塞消费超声波数据 */
         evt = osMessageGet(BarrierdistanceHandle, 0);
         if (evt.status == osEventMessage)
         {
           g_BarrierDistance = (uint16_t)evt.value.v;
         }
 
-        /* ② 非阻塞消费循迹数据 → 更新 g_DriveCmd */
+        /* ② 非阻塞消费循迹数据 */
         evt = osMessageGet(TrackingStatusHandle, 0);
         if (evt.status == osEventMessage)
         {
           sensor = (uint16_t)evt.value.v & 0x1F;
+          g_TrackSensors = sensor;  /* 快照供 OLED 显示 */
 
-          /*
-           * 加权质心法
-           * 传感器布局: L2(-2) L1(-1) M(0) R1(+1) R2(+2)
-           */
           int8_t error = 0;
           if (sensor & SENSOR_L2_MASK) error -= 2;
           if (sensor & SENSOR_L1_MASK) error -= 1;
           if (sensor & SENSOR_R1_MASK) error += 1;
           if (sensor & SENSOR_R2_MASK) error += 2;
 
-          if (sensor == 0x00 || error == 0)
+          /*
+           * 多级差速转向 (4 级, 含 2 级直行死区)
+           *
+           *   |error|=0: FORWARD, 内外同速 20          (居中)
+           *   |error|=1: FORWARD, 内侧 17 / 外侧 20    (微调, 仍直行)
+           *   |error|=2: LEFT/RIGHT, 内侧 10 / 外侧 20 (中度转向)
+           *   |error|=3: LEFT/RIGHT, 内侧  2 / 外侧 20 (急转)
+           *
+           *   后轮 = 前轮 × REAR_RATIO / 100
+           *   |error|≤1 归为 FORWARD → 直行状态占比显著增大
+           */
+          if (sensor == 0x00)
           {
             g_DriveCmd.dir = DRIVE_FORWARD;
-            uint8_t spd = (sensor == 0x00) ? TRACK_LOST_SPEED
-                                           : TRACK_BASE_SPEED;
-            g_DriveCmd.lfSpeed = g_DriveCmd.lrSpeed = spd;
-            g_DriveCmd.rfSpeed = g_DriveCmd.rrSpeed = spd;
-          }
-          else if (error < 0)
-          {
-            g_DriveCmd.dir = DRIVE_LEFT;
-            g_DriveCmd.lfSpeed = 0; g_DriveCmd.lrSpeed = 0;
-            g_DriveCmd.rfSpeed = TRACK_TURN_SPEED;
-            g_DriveCmd.rrSpeed = TRACK_TURN_SPEED;
+            g_DriveCmd.lfSpeed = g_DriveCmd.lrSpeed = TRACK_LOST_SPEED;
+            g_DriveCmd.rfSpeed = g_DriveCmd.rrSpeed = TRACK_LOST_SPEED;
           }
           else
           {
-            g_DriveCmd.dir = DRIVE_RIGHT;
-            g_DriveCmd.lfSpeed = TRACK_TURN_SPEED;
-            g_DriveCmd.lrSpeed = TRACK_TURN_SPEED;
-            g_DriveCmd.rfSpeed = 0; g_DriveCmd.rrSpeed = 0;
+            uint8_t absE = (error < 0) ? (uint8_t)(-error)
+                                       : (uint8_t)error;
+            uint8_t innerF;  /* 内侧前轮 */
+            uint8_t outerF;  /* 外侧前轮 */
+
+            if      (absE == 0) { innerF = TRACK_BASE_SPEED;             outerF = TRACK_BASE_SPEED; }
+            else if (absE == 1) { innerF = TRACK_BASE_SPEED * 85 / 100; outerF = TRACK_BASE_SPEED; }
+            else if (absE == 2) { innerF = TRACK_BASE_SPEED * 50 / 100; outerF = TRACK_BASE_SPEED; }
+            else                { innerF = TRACK_BASE_SPEED * 10 / 100; outerF = TRACK_BASE_SPEED; }
+
+            /* 方向: |error|≤1 → 直行; |error|≥2 → 转向 */
+            if (absE <= 1)
+              g_DriveCmd.dir = DRIVE_FORWARD;
+            else
+              g_DriveCmd.dir = (error < 0) ? DRIVE_LEFT : DRIVE_RIGHT;
+
+            /* 分配左右: error≤0 → 线偏左, 左侧为内轮 */
+            if (error <= 0) {
+              g_DriveCmd.lfSpeed = innerF; g_DriveCmd.rfSpeed = outerF;
+            } else {
+              g_DriveCmd.lfSpeed = outerF; g_DriveCmd.rfSpeed = innerF;
+            }
+            g_DriveCmd.lrSpeed = (uint8_t)((uint32_t)g_DriveCmd.lfSpeed
+                                           * TRACK_REAR_RATIO / 100);
+            g_DriveCmd.rrSpeed = (uint8_t)((uint32_t)g_DriveCmd.rfSpeed
+                                           * TRACK_REAR_RATIO / 100);
           }
         }
 
-        /* ③ 避障优先: 最新距离 ≤ 阈值 → 覆盖为停车 */
+        /* ③ 避障优先: 覆盖为停车 */
         if (g_BarrierDistance > 0
             && g_BarrierDistance <= OBSTACLE_STOP_CM)
         {
@@ -302,27 +465,70 @@ void StartChassisTask(void const * argument)
   /*
    * ChassisTask — 纯执行层 (严禁决策)
    *   输入: g_DriveCmd (由 CommandTask 写入), g_SystemEnabled
-   *   执行: 电机 (TrackStop/TrackDrive), LED 方向灯, 蜂鸣器旋律
+   *   执行: 电机 / LED / 蜂鸣器 / OLED 显示
    */
   DriveCommand  lastCmd = {DRIVE_STOP, 0, 0, 0, 0};
   static uint8_t  melodyIdx = 0;
   static uint32_t melodyElapsedUs = 0;
+  static uint8_t  oledInited = 0;
+  static uint32_t lastSecTick = 0;    /* 秒计时基准 (ms)       */
+  static uint32_t runSec      = 0;    /* 运行秒数累加器         */
+
+  /* OLED 初始化 (仅一次, 含 I2C 恢复) */
+  if (!oledInited) {
+    OLED_Init(&hi2c2);
+    oledInited = 1;
+    lastSecTick = DWT_GetUs() / 1000;
+  }
 
   for(;;)
   {
-    /* ---- 系统关闭: 全停 + 复位旋律 ---- */
-    if (!g_SystemEnabled)
+    /* ---- 运行计时 (每 1000ms 自增, 供 OLED 看门狗) ---- */
+    {
+      uint32_t now = DWT_GetUs() / 1000;
+      if (now - lastSecTick >= 1000) {
+        runSec++;
+        lastSecTick = now;
+        g_RunTimeSec = runSec;
+      }
+    }
+
+    /* ---- OLED 显示: 全局即时刷新 (不受系统状态限制) ---- */
+    OLED_ShowStatus((uint8_t)g_SystemEnabled,
+                    g_TrackSensors,
+                    g_BarrierDistance,
+                    g_CalibPulse,
+                    g_CalibFailed,
+                    runSec);
+
+    /* ---- 非运行态: 全停 + 复位 ---- */
+    if (g_SystemEnabled != STATE_ENABLED)
     {
       if (lastCmd.dir != DRIVE_STOP) TrackStop();
-      HAL_GPIO_WritePin(LED_R_GPIO_Port,  LED_R_Pin,  GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(LED_L_GPIO_Port,  LED_L_Pin,  GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(LED_HR_GPIO_Port, LED_HR_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(LED_HL_GPIO_Port, LED_HL_Pin, GPIO_PIN_RESET);
+
+      /* CAL_FAILED → LED 1Hz 频闪; 其他非运行态 → 全灭 */
+      if (g_SystemEnabled == STATE_CAL_FAILED)
+      {
+        uint32_t phase = (DWT_GetUs() / 1000) % 1000;  /* 0-999ms */
+        uint8_t  on    = (phase < 500);                  /* 500ms 亮/灭 */
+        HAL_GPIO_WritePin(LED_R_GPIO_Port,  LED_R_Pin,  on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_L_GPIO_Port,  LED_L_Pin,  on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_HR_GPIO_Port, LED_HR_Pin, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_HL_GPIO_Port, LED_HL_Pin, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      }
+      else
+      {
+        HAL_GPIO_WritePin(LED_R_GPIO_Port,  LED_R_Pin,  GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_L_GPIO_Port,  LED_L_Pin,  GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_HR_GPIO_Port, LED_HR_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_HL_GPIO_Port, LED_HL_Pin, GPIO_PIN_RESET);
+      }
+
       HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
       lastCmd.dir = DRIVE_STOP;
       melodyIdx = 0;
       melodyElapsedUs = 0;
-      osDelay(50);
+      osDelay(20);
       continue;
     }
 
@@ -356,15 +562,15 @@ void StartChassisTask(void const * argument)
 
     /* ---- LED: 方向指示 (使用快照) ---- */
     HAL_GPIO_WritePin(LED_R_GPIO_Port,  LED_R_Pin,
-      (cmd.dir == DRIVE_FORWARD || cmd.dir == DRIVE_LEFT)
-      ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(LED_L_GPIO_Port,  LED_L_Pin,
       (cmd.dir == DRIVE_FORWARD || cmd.dir == DRIVE_RIGHT)
       ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LED_L_GPIO_Port,  LED_L_Pin,
+      (cmd.dir == DRIVE_FORWARD || cmd.dir == DRIVE_LEFT)
+      ? GPIO_PIN_SET : GPIO_PIN_RESET);
     HAL_GPIO_WritePin(LED_HR_GPIO_Port, LED_HR_Pin,
-      (cmd.dir == DRIVE_LEFT)  ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(LED_HL_GPIO_Port, LED_HL_Pin,
       (cmd.dir == DRIVE_RIGHT) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LED_HL_GPIO_Port, LED_HL_Pin,
+      (cmd.dir == DRIVE_LEFT)  ? GPIO_PIN_SET : GPIO_PIN_RESET);
 
     /* ---- 蜂鸣器: 小星星旋律循环, 避障时静音 ---- */
     if (g_BarrierDistance > 0 && g_BarrierDistance <= OBSTACLE_STOP_CM)
@@ -503,6 +709,59 @@ const MelodyNote MELODY_LANHUACAO[MELODY_NOTE_COUNT] = {
 
 #undef H
 #undef Q
+
+/* ---- 循迹 IR 自校准辅助函数 ---- */
+
+/* 设置 IR PWM 占空比 (TIM4_CH3) */
+static void Calib_SetPWM(uint16_t pulse) {
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, pulse);
+}
+
+/*
+ * 多次采样中间三路传感器 (L1|M|R1), 检查是否有任意一路稳定为 HIGH
+ * 返回 1: 至少一路 ≥ CALIB_STABLE_RATIO 次 HIGH (稳定检测到黑线)
+ * 返回 0: 全部不满足条件
+ */
+static uint8_t Calib_ReadMidSensors(void) {
+  uint8_t cnt[3] = {0, 0, 0};  /* L1, M, R1 */
+
+  for (uint8_t i = 0; i < CALIB_SAMPLE_COUNT; i++)
+  {
+    if (HAL_GPIO_ReadPin(GPIOA, XJ_4_Pin) == GPIO_PIN_SET) cnt[0]++;  /* L1 */
+    if (HAL_GPIO_ReadPin(GPIOA, XJ_3_Pin) == GPIO_PIN_SET) cnt[1]++;  /* M  */
+    if (HAL_GPIO_ReadPin(GPIOA, XJ_2_Pin) == GPIO_PIN_SET) cnt[2]++;  /* R1 */
+    DWT_DelayUs(500);  /* 采样间隔 500µs, 共 8 次 ≈ 4ms */
+  }
+
+  return (cnt[0] >= CALIB_STABLE_RATIO ||
+          cnt[1] >= CALIB_STABLE_RATIO ||
+          cnt[2] >= CALIB_STABLE_RATIO);
+}
+
+/*
+ * 多次采样全部 5 路传感器, 检查是否全部稳定为 HIGH
+ * 用于确定下限阈值 (亮度太低 → 白色也被误判为黑线)
+ */
+static uint8_t Calib_ReadAllSensors(void) {
+  uint8_t cnt[5] = {0, 0, 0, 0, 0};  /* L2, L1, M, R1, R2 */
+
+  for (uint8_t i = 0; i < CALIB_SAMPLE_COUNT; i++)
+  {
+    if (HAL_GPIO_ReadPin(GPIOB, XJ_5_Pin) == GPIO_PIN_SET) cnt[0]++;  /* L2 */
+    if (HAL_GPIO_ReadPin(GPIOA, XJ_4_Pin) == GPIO_PIN_SET) cnt[1]++;  /* L1 */
+    if (HAL_GPIO_ReadPin(GPIOA, XJ_3_Pin) == GPIO_PIN_SET) cnt[2]++;  /* M  */
+    if (HAL_GPIO_ReadPin(GPIOA, XJ_2_Pin) == GPIO_PIN_SET) cnt[3]++;  /* R1 */
+    if (HAL_GPIO_ReadPin(GPIOA, XJ_1_Pin) == GPIO_PIN_SET) cnt[4]++;  /* R2 */
+    DWT_DelayUs(500);
+  }
+
+  /* 全部 5 路均 ≥ STABLE_RATIO */
+  return (cnt[0] >= CALIB_STABLE_RATIO &&
+          cnt[1] >= CALIB_STABLE_RATIO &&
+          cnt[2] >= CALIB_STABLE_RATIO &&
+          cnt[3] >= CALIB_STABLE_RATIO &&
+          cnt[4] >= CALIB_STABLE_RATIO);
+}
 
 /* ---- DWT 微秒级定时工具 (用于 SR04 超声波测距) ---- */
 static void DWT_DelayUs(uint32_t us) {

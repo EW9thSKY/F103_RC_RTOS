@@ -198,7 +198,10 @@ HAL_StatusTypeDef RZ7899_Init(RZ7899_Handle* handle) {
 HAL_StatusTypeDef RZ7899_SetSpeed(RZ7899_Handle* handle, uint8_t duty) {
     if (handle == NULL || duty > 100) return HAL_ERROR;
 
-    if (handle->Lock != NULL) xSemaphoreTake(handle->Lock, portMAX_DELAY);
+    /* 100ms 超时 (防死锁, portMAX_DELAY → pdMS_TO_TICKS(100)) */
+    if (handle->Lock != NULL &&
+        xSemaphoreTake(handle->Lock, pdMS_TO_TICKS(100)) != pdTRUE)
+        return HAL_TIMEOUT;
     RZ7899_SetSpeedInternal(handle, duty);
     if (handle->Lock != NULL) xSemaphoreGive(handle->Lock);
 
@@ -208,7 +211,9 @@ HAL_StatusTypeDef RZ7899_SetSpeed(RZ7899_Handle* handle, uint8_t duty) {
 HAL_StatusTypeDef RZ7899_SetDirection(RZ7899_Handle* handle, RZ7899_Direction dir) {
     if (handle == NULL) return HAL_ERROR;
 
-    if (handle->Lock != NULL) xSemaphoreTake(handle->Lock, portMAX_DELAY);
+    if (handle->Lock != NULL &&
+        xSemaphoreTake(handle->Lock, pdMS_TO_TICKS(100)) != pdTRUE)
+        return HAL_TIMEOUT;
     RZ7899_SetDirectionInternal(handle, dir);
     if (handle->Lock != NULL) xSemaphoreGive(handle->Lock);
 
@@ -218,7 +223,9 @@ HAL_StatusTypeDef RZ7899_SetDirection(RZ7899_Handle* handle, RZ7899_Direction di
 HAL_StatusTypeDef RZ7899_Forward(RZ7899_Handle* handle, uint8_t duty) {
     if (handle == NULL || duty > 100) return HAL_ERROR;
 
-    if (handle->Lock != NULL) xSemaphoreTake(handle->Lock, portMAX_DELAY);
+    if (handle->Lock != NULL &&
+        xSemaphoreTake(handle->Lock, pdMS_TO_TICKS(100)) != pdTRUE)
+        return HAL_TIMEOUT;
     RZ7899_SetDirectionInternal(handle, RZ7899_FORWARD);
     RZ7899_SetSpeedInternal(handle, duty);
     if (handle->Lock != NULL) xSemaphoreGive(handle->Lock);
@@ -229,7 +236,9 @@ HAL_StatusTypeDef RZ7899_Forward(RZ7899_Handle* handle, uint8_t duty) {
 HAL_StatusTypeDef RZ7899_Reverse(RZ7899_Handle* handle, uint8_t duty) {
     if (handle == NULL || duty > 100) return HAL_ERROR;
 
-    if (handle->Lock != NULL) xSemaphoreTake(handle->Lock, portMAX_DELAY);
+    if (handle->Lock != NULL &&
+        xSemaphoreTake(handle->Lock, pdMS_TO_TICKS(100)) != pdTRUE)
+        return HAL_TIMEOUT;
     RZ7899_SetDirectionInternal(handle, RZ7899_REVERSE);
     RZ7899_SetSpeedInternal(handle, duty);
     if (handle->Lock != NULL) xSemaphoreGive(handle->Lock);
@@ -240,7 +249,9 @@ HAL_StatusTypeDef RZ7899_Reverse(RZ7899_Handle* handle, uint8_t duty) {
 HAL_StatusTypeDef RZ7899_Stop(RZ7899_Handle* handle) {
     if (handle == NULL) return HAL_ERROR;
 
-    if (handle->Lock != NULL) xSemaphoreTake(handle->Lock, portMAX_DELAY);
+    if (handle->Lock != NULL &&
+        xSemaphoreTake(handle->Lock, pdMS_TO_TICKS(100)) != pdTRUE)
+        return HAL_TIMEOUT;
     RZ7899_SetDirectionInternal(handle, RZ7899_STOP);
     if (handle->Lock != NULL) xSemaphoreGive(handle->Lock);
 

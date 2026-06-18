@@ -9,12 +9,23 @@
 /* 循迹红外供电 ---------------------------------------------------*/
 /* IR_PWM (PB8 / TIM4_CH3) 占空比，范围 0~65535                    */
 /* 值越大 → 红外越亮 → 循迹灵敏度越高                               */
+/* 上电自校准后会覆盖此初始值                                        */
 #define IR_PWM_PULSE  65535
 
-/* 循迹比例控制 ---------------------------------------------------*/
-#define TRACK_BASE_SPEED  20    /* 基准速度 (0~100%)               */
-#define TRACK_TURN_SPEED  10    /* 单边停止转向速度                 */
-#define TRACK_LOST_SPEED  10    /* 丢线搜索速度                    */             
+/* 循迹自校准参数 -------------------------------------------------*/
+#define CALIB_COARSE_STEP  1966   /* 粗扫步长 (65535×3%)           */
+#define CALIB_FINE_STEP     196   /* 精扫步长 (65535×0.3%)         */
+#define CALIB_COARSE_MS     200   /* 粗扫每步稳定时间 (ms)          */
+#define CALIB_FINE_MS        80   /* 精扫每步稳定时间 (ms)          */
+#define CALIB_SAMPLE_COUNT    8   /* 每步采样次数                   */
+#define CALIB_STABLE_RATIO    6   /* 稳定判定: ≥N 次 HIGH (≤8)     */
+#define CALIB_MIN_PULSE     655   /* 最低搜索阈值 (1%)              */
+#define CALIB_MID_MASK   0x000E   /* L1|M|R1 中间三路 (bit1-3)     */
+
+/* 循迹差速控制 ---------------------------------------------------*/
+#define TRACK_BASE_SPEED        40  /* 基准速度 (外侧轮, 0~100%)    */
+#define TRACK_LOST_SPEED        20  /* 丢线搜索速度                  */
+#define TRACK_REAR_RATIO        50  /* 后轮速度比例 (前轮的 %)       */
 
 /* 电机物理方向 ---------------------------------------------------*/
 /* 1 = 该电机安装方向与逻辑方向相反，需反转                           */
@@ -41,7 +52,7 @@
 /* TRIG=PA8, ECHO=PB9                                                */
 #define SR04_TIMEOUT_US   30000  /* 超时时间 (us), 对应 ~5m         */
 #define SR04_MAX_DIST_CM  450    /* 最大有效距离 (cm)                */
-#define OBSTACLE_STOP_CM  5      /* 避障停车距离 (cm)                */
+#define OBSTACLE_STOP_CM  10      /* 避障停车距离 (cm)                */
 
 /* 蜂鸣器音乐 -------------------------------------------------------*/
 /* PA2 / BUZZER, 无源蜂鸣器                                          */
