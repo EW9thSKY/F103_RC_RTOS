@@ -12,9 +12,8 @@
 | 电机驱动 | RZ7899 ×4（四轮独立驱动） |
 | 循迹 | 5 路红外对管（XJ_1 ~ XJ_5） |
 | 超声波 | HC-SR04 |
-| 无线 | NRF24L01 (SPI) |
 | 显示 | OLED (I2C) |
-| RTOS | FreeRTOS v10.3.1 |
+| RTOS | FreeRTOS|
 | 构建 | CMake + Ninja / STM32CubeIDE |
 
 ## 快速开始
@@ -39,7 +38,6 @@
 | 电机 RH | PB7/PA11 (TIM4_CH2) |
 | 红外 PWM | PB8 (TIM4_CH3) |
 | 超声波 TRIG/ECHO | PA8/PB9 |
-| SPI (NRF2401) | PB12~PB14 |
 | I2C (OLED) | PB10/PB11 |
 | UART | PA9/PA10 |
 
